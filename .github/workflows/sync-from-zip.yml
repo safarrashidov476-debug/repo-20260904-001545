@@ -1,0 +1,75 @@
+name: ZIP yuklanganda repo'ni tozalab yangilash
+
+on:
+  push:
+    paths:
+      - '*.zip'
+  workflow_dispatch: {}
+
+jobs:
+  sync-from-zip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repo'ni checkout qilish
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ZIP faylni topish
+        id: findzip
+        run: |
+          ZIP_FILE=$(ls -1 *.zip 2>/dev/null | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "❌ Repo ildizida .zip fayl topilmadi. Ish bekor qilinmoqda."
+            exit 1
+          fi
+          echo "Topildi: $ZIP_FILE"
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: ZIP faylni xavfsiz joyga (repo tashqarisiga) nusxalash
+        run: |
+          mkdir -p /tmp/tiflogram-upload
+          cp "${{ steps.findzip.outputs.zip_file }}" /tmp/tiflogram-upload/upload.zip
+
+      - name: Imzolash kalitini vaqtincha xavfsiz joyga ko'chirish
+        run: |
+          mkdir -p /tmp/tiflogram-keystore-backup
+          if [ -f release.keystore ]; then
+            cp release.keystore /tmp/tiflogram-keystore-backup/
+            cp release.keystore.password /tmp/tiflogram-keystore-backup/ 2>/dev/null || true
+            echo "✅ Imzolash kaliti saqlab qo'yildi (bu o'chirilmaydi)"
+          else
+            echo "ℹ️ Hali imzolash kaliti yo'q (birinchi build'da yaratiladi)"
+          fi
+
+      - name: Barcha eski fayllarni o'chirish (faqat .git qoladi)
+        run: |
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          echo "Eski fayllar tozalandi."
+
+      - name: Yangi ZIP mazmunini joylashtirish
+        run: |
+          unzip -o /tmp/tiflogram-upload/upload.zip -d .
+          echo "Yangi fayllar joylashtirildi:"
+          ls -la
+
+      - name: Imzolash kalitini qaytarish
+        run: |
+          if [ -f /tmp/tiflogram-keystore-backup/release.keystore ]; then
+            cp /tmp/tiflogram-keystore-backup/release.keystore .
+            cp /tmp/tiflogram-keystore-backup/release.keystore.password . 2>/dev/null || true
+            echo "✅ Imzolash kaliti qaytarildi — ustiga yangilash muammosiz ishlaydi"
+          fi
+
+      - name: O'zgarishlarni commit va push qilish
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "O'zgarish yo'q — commit qilinmadi."
+          else
+            git commit -m "ZIP orqali avtomatik yangilash (eski fayllar tozalandi)"
+            git push
+            echo "✅ Repo yangilandi va tozalandi."
+          fi

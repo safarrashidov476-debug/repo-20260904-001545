@@ -1,0 +1,135 @@
+name: Tiflogram - mavjud APK'ni tuzatish (qayta qurmasdan)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Qaysi release'dagi APK tuzatilsin (masalan build-12). Bo'sh qoldirsangiz eng oxirgisi olinadi."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repo skriptlarini olish
+        uses: actions/checkout@v4
+        with:
+          path: my-files
+
+      - name: JDK 17 (baksmali/smali uchun)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Android build-tools (zipalign, apksigner)
+        uses: android-actions/setup-android@v3
+
+      - name: Build-tools o'rnatish
+        run: sdkmanager --install "build-tools;34.0.0"
+
+      - name: Eski APK'ni GitHub Release'dan yuklab olish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
+          fi
+          echo "Tanlangan release: $TAG"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          gh release download "$TAG" -p '*.apk' -D . --clobber
+          APK_FILE=$(find . -maxdepth 1 -name "*.apk" | head -n 1)
+          if [ -z "$APK_FILE" ]; then
+            echo "XATO: release'dan .apk topilmadi"
+            exit 1
+          fi
+          mv "$APK_FILE" original.apk
+          echo "Olindi: $APK_FILE -> original.apk"
+
+      - name: baksmali va smali'ni yuklab olish
+        run: |
+          BAK_URL=$(curl -sL https://api.github.com/repos/JesusFreke/smali/releases/latest \
+            | grep '"browser_download_url"' | grep -o 'https://[^"]*baksmali-[0-9][^"]*\.jar' | head -n 1)
+          SMALI_URL=$(curl -sL https://api.github.com/repos/JesusFreke/smali/releases/latest \
+            | grep '"browser_download_url"' | grep -o 'https://[^"]*/smali-[0-9][^"]*\.jar' | head -n 1)
+          echo "baksmali: $BAK_URL"
+          echo "smali:    $SMALI_URL"
+          curl -sL -o baksmali.jar "$BAK_URL"
+          curl -sL -o smali.jar "$SMALI_URL"
+
+      - name: APK ichidan classes*.dex fayllarni ajratib olish
+        run: |
+          mkdir -p apk_unpacked
+          unzip -oq original.apk -d apk_unpacked
+          find apk_unpacked -maxdepth 1 -name "classes*.dex"
+
+      - name: UserConfig qaysi dex'da ekanini topib, o'sha faylni tuzatish
+        run: |
+          set -e
+          FOUND=""
+          for DEX in apk_unpacked/classes*.dex; do
+            NAME=$(basename "$DEX")
+            echo "=== $NAME tekshirilmoqda ==="
+            OUT="smali_out_$NAME"
+            java -jar baksmali.jar d "$DEX" -o "$OUT"
+            TARGET="$OUT/org/telegram/messenger/UserConfig.smali"
+            if [ -f "$TARGET" ]; then
+              echo "✅ UserConfig topildi: $NAME"
+              python3 my-files/scripts/patch_account_limit_smali.py "$TARGET"
+              java -jar smali.jar a "$OUT" -o "patched_$NAME"
+              cp "patched_$NAME" "apk_unpacked/$NAME"
+              FOUND="$NAME"
+              break
+            fi
+          done
+          if [ -z "$FOUND" ]; then
+            echo "XATO: UserConfig.smali hech bir dex'da topilmadi"
+            exit 1
+          fi
+          echo "PATCHED_DEX=$FOUND" >> "$GITHUB_ENV"
+
+      - name: APK'ni qayta yig'ish (eski imzo o'chiriladi)
+        run: |
+          cd apk_unpacked
+          rm -rf META-INF
+          zip -r -q -X ../repacked.apk .
+          cd ..
+
+      - name: Tekislash (zipalign)
+        run: |
+          BUILD_TOOLS_DIR=$(find $ANDROID_HOME/build-tools -maxdepth 1 -type d -name "34*" | sort -V | tail -n 1)
+          "$BUILD_TOOLS_DIR/zipalign" -v -p 4 repacked.apk aligned.apk
+
+      - name: Imzolash (avvalgi kalit bilan - o'sha imzo saqlanadi)
+        run: |
+          BUILD_TOOLS_DIR=$(find $ANDROID_HOME/build-tools -maxdepth 1 -type d -name "34*" | sort -V | tail -n 1)
+          KEYSTORE_PW=$(cat my-files/release.keystore.password)
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks my-files/release.keystore \
+            --ks-key-alias tiflogram \
+            --ks-pass "pass:$KEYSTORE_PW" \
+            --key-pass "pass:$KEYSTORE_PW" \
+            --out tiflogram-patched.apk \
+            aligned.apk
+
+      - name: Natijani Artifacts'ga yuklash
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiflogram-patched
+          path: tiflogram-patched.apk
+
+      - name: Yangi Release yaratish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: patch-${{ github.run_number }}
+          name: "Tiflogram - tuzatilgan APK #${{ github.run_number }} (asos: ${{ env.TAG }}, dex: ${{ env.PATCHED_DEX }})"
+          files: tiflogram-patched.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

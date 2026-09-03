@@ -1,0 +1,407 @@
+name: Tiflogram - to'liq APK yig'ish
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/**'
+      - 'assets/**'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Sizning repo fayllaringizni olish (skriptlar)
+        uses: actions/checkout@v4
+        with:
+          path: my-files
+
+      - name: Skriptlar sintaksisini oldindan tekshirish
+        run: |
+          echo "=== Barcha .py skriptlar sintaksisi tekshirilmoqda ==="
+          HATO=0
+          for f in my-files/scripts/*.py; do
+            if python3 -m py_compile "$f"; then
+              echo "✅ $f"
+            else
+              echo "❌ $f — SINTAKSIS XATOSI (yuqorida ko'rsatilgan)"
+              HATO=1
+            fi
+          done
+          if [ "$HATO" -eq 1 ]; then
+            echo ""
+            echo "⛔ Bitta yoki bir nechta skriptda sintaksis xatosi bor. Build to'xtatildi."
+            exit 1
+          fi
+          echo "Hammasi toza — build davom etadi."
+
+      - name: Ishchi papkani tozalash
+        run: rm -rf telegram-src
+
+      - name: Telegram manba kodini yuklab olish
+        run: |
+          set -euo pipefail
+          # Pin: ANALYSIS_BUILD3.md dagi ishlagan commit (Telegram 12.10.1 / 7038)
+          # Pin qilinmasa master o'zgarib patchlar sinadi.
+          PIN_COMMIT="62b56a07ca7e30e39f7fd00a6728d6bbd716ca1c"
+          git clone --recursive https://github.com/DrKLO/Telegram.git telegram-src
+          cd telegram-src
+          if git cat-file -e "${PIN_COMMIT}^{commit}" 2>/dev/null; then
+            git checkout -f "$PIN_COMMIT"
+            echo "✅ Telegram pin: $PIN_COMMIT"
+          else
+            echo "⚠️ Pin commit topilmadi — master ishlatiladi (xavfli)"
+            git rev-parse HEAD
+          fi
+          git log -1 --oneline
+
+      - name: Manba va patch mosligini tekshirish (o‘zgartirishsiz)
+        working-directory: telegram-src
+        env:
+          TELEGRAM_SRC: ${{ github.workspace }}/telegram-src
+        run: |
+          set -euo pipefail
+          test -f settings.gradle || test -f settings.gradle.kts
+          test -f gradle.properties
+          python3 ../my-files/scripts/run_all_checks.py
+
+      - name: versionCode'ni majburiy oshirish (yangilanish ishlashi uchun)
+        run: |
+          set -euo pipefail
+          cd telegram-src
+          python3 ../my-files/scripts/patch_version_code.py "${{ github.run_number }}"
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: NDK o'rnatish
+        run: sdkmanager --install "ndk;26.1.10909125"
+
+      - name: Build-tools o'rnatish (imzolash uchun)
+        run: sdkmanager --install "build-tools;34.0.0"
+
+      # ============================================================
+      # Bizning accessibility, branding va reklama skriptlarimizni qo'llash
+      # ============================================================
+      - name: Accessibility tuzatishlarini qo'llash
+        run: |
+          cd telegram-src
+          python3 ../my-files/scripts/fix_accessibility.py apply
+
+      - name: Ilova nomi va paket nomini qo'llash (Tiflogram)
+        run: |
+          cd telegram-src
+          python3 ../my-files/scripts/fix_branding.py apply
+
+      - name: Reklamalarni o'chirish (sponsored messages)
+        run: |
+          cd telegram-src
+          python3 ../my-files/scripts/fix_ads.py apply
+
+      - name: Gemini safety scanner faylini ko'chirish
+        run: |
+          set -euo pipefail
+          # Qat'iy yo'l — find ishonchsiz (boshqa modullar/submodule lar aralashishi mumkin)
+          DEST="telegram-src/TMessagesProj/src/main/java/org/telegram/messenger"
+          test -d "$DEST" || { echo "❌ $DEST topilmadi"; ls -la telegram-src/; exit 1; }
+          SRC="my-files/assets/java/org/telegram/messenger/GeminiSafetyScanner.java"
+          test -f "$SRC" || { echo "❌ $SRC topilmadi"; exit 1; }
+          cp -f "$SRC" "$DEST/GeminiSafetyScanner.java"
+          # Tekshirish: fayl haqiqatan joyida va package to'g'ri
+          test -f "$DEST/GeminiSafetyScanner.java" || { echo "❌ copy muvaffaqiyatsiz"; exit 1; }
+          grep -q 'package org.telegram.messenger;' "$DEST/GeminiSafetyScanner.java" || { echo "❌ package noto'g'ri"; exit 1; }
+          grep -q 'openAssistant' "$DEST/GeminiSafetyScanner.java" || { echo "❌ openAssistant metodi yo'q"; exit 1; }
+          echo "✅ GeminiSafetyScanner.java -> $DEST/"
+          ls -la "$DEST/GeminiSafetyScanner.java"
+
+      - name: Gemini skaner patchlarini qo'llash
+        run: |
+          cd telegram-src
+          python3 ../my-files/scripts/fix_gemini.py apply
+          # Patchdan keyin ham class mavjudligini tasdiqlash
+          test -f TMessagesProj/src/main/java/org/telegram/messenger/GeminiSafetyScanner.java \
+            || { echo "❌ GeminiSafetyScanner.java patchdan keyin yo'qoldi"; exit 1; }
+
+      - name: TiflogramTranslate (Google Translate) faylini ko'chirish
+        run: |
+          set -euo pipefail
+          DEST="telegram-src/TMessagesProj/src/main/java/org/telegram/messenger"
+          test -d "$DEST" || { echo "❌ $DEST topilmadi"; exit 1; }
+          SRC="my-files/assets/java/org/telegram/messenger/TiflogramTranslate.java"
+          if [ -f "$SRC" ]; then
+            cp -f "$SRC" "$DEST/TiflogramTranslate.java"
+            test -f "$DEST/TiflogramTranslate.java"
+            echo "✅ TiflogramTranslate.java -> $DEST/"
+          else
+            echo "⚠️ TiflogramTranslate.java topilmadi — o'tkazib yuborildi"
+          fi
+
+      - name: Chat ichidagi xabar tovushini almashtirish + raw resurslar
+        run: |
+          set -euo pipefail
+          cd telegram-src
+          # Qat'iy yo'l — R.raw faqat TMessagesProj moduli orqali generatsiya qilinadi
+          RES="TMessagesProj/src/main/res"
+          test -d "$RES" || { echo "❌ $RES topilmadi"; find . -type d -name res | head -20; exit 1; }
+          mkdir -p "$RES/raw"
+
+          if [ -f ../my-files/assets/sound_in.wav ]; then
+            cp -f ../my-files/assets/sound_in.wav "$RES/raw/sound_in.wav"
+            echo "✅ sound_in.wav"
+            ls -la "$RES/raw/sound_in.wav"
+          else
+            echo "⚠️ sound_in.wav topilmadi — standart tovush qoladi"
+          fi
+
+          if [ -f ../my-files/assets/tiflogram_dl_done.wav ]; then
+            cp -f ../my-files/assets/tiflogram_dl_done.wav "$RES/raw/tiflogram_dl_done.wav"
+            # Android resource nomi: faqat [a-z0-9_] — tekshiramiz
+            test -f "$RES/raw/tiflogram_dl_done.wav" || { echo "❌ tiflogram_dl_done.wav copy muvaffaqiyatsiz"; exit 1; }
+            # Fayl hajmi 0 bo'lmasligi kerak
+            SZ=$(stat -c%s "$RES/raw/tiflogram_dl_done.wav" 2>/dev/null || stat -f%z "$RES/raw/tiflogram_dl_done.wav")
+            test "$SZ" -gt 1000 || { echo "❌ tiflogram_dl_done.wav juda kichik ($SZ bayt)"; exit 1; }
+            echo "✅ tiflogram_dl_done.wav ($SZ bayt) -> $RES/raw/"
+            ls -la "$RES/raw/tiflogram_dl_done.wav"
+          else
+            echo "❌ tiflogram_dl_done.wav topilmadi — build to'xtatiladi"
+            exit 1
+          fi
+
+          # Resource ro'yxatini ko'rsatish (diagnostika)
+          echo "=== TMessagesProj/src/main/res/raw/ ==="
+          ls -la "$RES/raw/" || true
+
+          python3 ../my-files/scripts/fix_download.py apply
+          python3 ../my-files/scripts/fix_accounts.py apply
+
+          # Patchdan keyin R.raw.tiflogram_dl_done ishlatilishini tasdiqlash
+          if grep -q 'R.raw.tiflogram_dl_done' TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java; then
+            echo "✅ DownloadController da R.raw.tiflogram_dl_done ishlatilgan"
+          else
+            echo "⚠️ DownloadController da R.raw.tiflogram_dl_done topilmadi (patch ishlamagan bo'lishi mumkin)"
+          fi
+
+      - name: Xabar tovushini faqat ochiq chatda chalish
+        run: |
+          cd telegram-src
+          python3 ../my-files/scripts/fix_chat_sound_scope.py apply
+
+      - name: Tarjimani hammaga bepul ochish
+        run: |
+          cd telegram-src
+          python3 ../my-files/scripts/fix_translate_free.py apply
+
+      - name: Tarjima - serverga bog'liq bo'lmagan yo'lni majburiy qilish
+        run: |
+          cd telegram-src
+          python3 ../my-files/scripts/fix_translate_alternative.py apply
+
+      - name: Tarjima tugmasi - Premium tekshiruvisiz bosilsin
+        run: |
+          cd telegram-src
+          python3 ../my-files/scripts/fix_translate_button.py apply
+
+      - name: Tarjima - Sozlamalar/Til bo'limidagi avtomatik tarjima tugmasi
+        run: |
+          cd telegram-src
+          python3 ../my-files/scripts/fix_translate_language_settings.py apply
+
+      - name: "DIAGNOSTIKA: tarjima bilan bog'liq barcha Premium tekshiruvlari"
+        run: |
+          cd telegram-src
+          echo "=== 'translat' so'zi yaqinida 'isPremium' uchraydigan joylar ==="
+          grep -rn -i -B2 -A2 "isPremium" --include="*.java" . | grep -i -B2 -A2 "translat" || echo "(topilmadi)"
+          echo ""
+          echo "=== Tarjima tugmasi ko'rinishini boshqaradigan joylar (ChatActivity, header) ==="
+          grep -rln "translat" --include="*.java" TMessagesProj/src/main/java/org/telegram/ui/ | xargs grep -ln -i "isPremium\|isFeatureAvailable" 2>/dev/null || echo "(topilmadi)"
+          echo ""
+          echo "=== Qo'llab-quvvatlanadigan tillar ro'yxati (agar qattiq kod bo'lsa) ==="
+          grep -rln "supportedLanguage\|translatableLanguage\|unsupported_language" --include="*.java" . || echo "(topilmadi)"
+          echo ""
+          echo "^ Yuqoridagi natijalarni Safar keyingi safar tekshiradi va aniq patch yozadi."
+
+      - name: Google Services plaginini butunlay o'chirish
+        run: |
+          cd telegram-src
+          echo "=== Google Services plagini izlarini o'chirmoqdamiz ==="
+          find . -name "build.gradle" -exec grep -l "google-services" {} \; | while read -r f; do
+            echo "Tozalanmoqda: $f"
+            sed -i "/apply plugin:.*google-services/d" "$f"
+            sed -i "/id[[:space:]]*['\"]com\.google\.gms\.google-services['\"]/d" "$f"
+            sed -i "/classpath.*google-services/d" "$f"
+          done
+          find . -name "google-services.json" -delete
+          echo "Tayyor."
+
+      # ============================================================
+      # IMZOLASH - avtomatik, faqat BIRINCHI marta yaratiladi va
+      # repo'ning o'ziga saqlanadi. BU FAQAT PRIVATE REPO UCHUN
+      # XAVFSIZ.
+      # ============================================================
+      - name: Imzolash kaliti (keystore) tayyorlash
+        run: |
+          if [ ! -f my-files/release.keystore ]; then
+            echo "Kalit topilmadi - yangi kalit yaratilmoqda (faqat bir marta)..."
+            KEYSTORE_PW=$(openssl rand -base64 18)
+            keytool -genkeypair -v \
+              -keystore my-files/release.keystore \
+              -alias tiflogram \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KEYSTORE_PW" -keypass "$KEYSTORE_PW" \
+              -dname "CN=Tiflogram, OU=Personal, O=Personal, L=Tashkent, S=Tashkent, C=UZ"
+            echo "$KEYSTORE_PW" > my-files/release.keystore.password
+            cd my-files
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add release.keystore release.keystore.password
+            git commit -m "Avtomatik: imzolash kaliti yaratildi"
+            git push
+          else
+            echo "Kalit allaqachon mavjud - shu kalit ishlatiladi."
+          fi
+
+      - name: Gradle'ni to'g'ridan-to'g'ri o'rnatish (wrapper jar buzilgan holatlar uchun zaxira)
+        working-directory: telegram-src
+        run: |
+          GRADLE_VERSION=$(grep -oE 'gradle-[0-9.]+-bin\.zip' gradle/wrapper/gradle-wrapper.properties | head -n1 | sed -E 's/gradle-([0-9.]+)-bin\.zip/\1/')
+          if [ -z "$GRADLE_VERSION" ]; then
+            echo "OGOHLANTIRISH: gradle-wrapper.properties'dan versiya topilmadi, 8.2 ishlatiladi"
+            GRADLE_VERSION="8.2"
+          fi
+          echo "Loyihaga kerakli Gradle versiyasi: $GRADLE_VERSION"
+          curl -sL --retry 3 -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+          if ! unzip -tq /tmp/gradle.zip > /dev/null 2>&1; then
+            echo "❌ Gradle distributivi yuklab olinmadi/buzilgan"
+            exit 1
+          fi
+          sudo unzip -q -o /tmp/gradle.zip -d /opt
+          echo "/opt/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+          echo "✅ Gradle ${GRADLE_VERSION} /opt ga o'rnatildi"
+
+      - name: Mavjud build variantlarini ko'rsatish (diagnostika)
+        run: |
+          echo "=== TMessagesProj_App uchun mavjud 'assemble' vazifalari ==="
+          gradle :TMessagesProj_App:tasks --all 2>&1 | grep -i assemble || echo "(topilmadi - modul nomi boshqacha bo'lishi mumkin)"
+        working-directory: telegram-src
+        continue-on-error: true
+
+      - name: Build oldidan majburiy tekshiruv (Gemini + raw)
+        run: |
+          set -euo pipefail
+          cd telegram-src
+          echo "=== PREFLIGHT: kompilyatsiya uchun zarur fayllar ==="
+          FAIL=0
+
+          GEMINI="TMessagesProj/src/main/java/org/telegram/messenger/GeminiSafetyScanner.java"
+          if [ -f "$GEMINI" ]; then
+            echo "✅ $GEMINI"
+            grep -n 'class GeminiSafetyScanner\|openAssistant\|package org.telegram.messenger' "$GEMINI" | head -5
+          else
+            echo "❌ $GEMINI YO'Q"
+            FAIL=1
+          fi
+
+          WAV="TMessagesProj/src/main/res/raw/tiflogram_dl_done.wav"
+          if [ -f "$WAV" ]; then
+            echo "✅ $WAV ($(stat -c%s "$WAV" 2>/dev/null || stat -f%z "$WAV") bayt)"
+          else
+            echo "❌ $WAV YO'Q — R.raw.tiflogram_dl_done generatsiya bo'lmaydi"
+            echo "raw/ ichida:"
+            ls -la TMessagesProj/src/main/res/raw/ 2>/dev/null || echo "(katalog yo'q)"
+            FAIL=1
+          fi
+
+          if grep -q 'R.raw.tiflogram_dl_done' TMessagesProj/src/main/java/org/telegram/messenger/DownloadController.java 2>/dev/null; then
+            echo "✅ DownloadController R.raw.tiflogram_dl_done ishlatadi"
+          else
+            echo "⚠️ DownloadController da R.raw.tiflogram_dl_done yo'q (patch qo'llanmagan?)"
+          fi
+
+          if grep -q 'GeminiSafetyScanner.openAssistant' TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java 2>/dev/null; then
+            echo "✅ DialogsActivity GeminiSafetyScanner chaqiradi"
+          else
+            echo "⚠️ DialogsActivity da GeminiSafetyScanner chaqiruvi yo'q"
+          fi
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo ""
+            echo "⛔ PREFLIGHT muvaffaqiyatsiz — Gradle ishga tushirilmaydi"
+            exit 1
+          fi
+          echo "=== PREFLIGHT OK ==="
+
+      - name: APK yig'ish
+        run: gradle :TMessagesProj_App:assembleAfatRelease --stacktrace
+        working-directory: telegram-src
+
+      - name: APK'ni topish
+        id: find_apk
+        run: |
+          echo "TMessagesProj_App/build/outputs/apk ichidan qidiryapmiz:"
+          find TMessagesProj_App/build/outputs/apk -type f -name "*.apk" || true
+
+          APK_FILE=$(find TMessagesProj_App/build/outputs/apk -type f -iname "*universal*release*.apk" | head -n 1)
+          if [ -z "$APK_FILE" ]; then
+            APK_FILE=$(find TMessagesProj_App/build/outputs/apk -type f -iname "*release*.apk" | head -n 1)
+          fi
+          if [ -z "$APK_FILE" ]; then
+            APK_FILE=$(find TMessagesProj_App/build/outputs/apk -type f -name "*.apk" | head -n 1)
+          fi
+
+          if [ -z "$APK_FILE" ]; then
+            echo "XATO: .apk fayli topilmadi! Yuqoridagi build logini tekshiring."
+            exit 1
+          fi
+
+          echo "Topilgan APK: $APK_FILE"
+          echo "apk_path=telegram-src/$APK_FILE" >> $GITHUB_OUTPUT
+        working-directory: telegram-src
+
+      - name: APK'ni tekislash va imzolash
+        id: sign_apk
+        run: |
+          BUILD_TOOLS_DIR=$(find $ANDROID_HOME/build-tools -maxdepth 1 -type d -name "34*" | sort -V | tail -n 1)
+          ZIPALIGN="$BUILD_TOOLS_DIR/zipalign"
+          APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
+
+          UNSIGNED_APK="${{ steps.find_apk.outputs.apk_path }}"
+          ALIGNED_APK="aligned-unsigned.apk"
+          SIGNED_APK="tiflogram-signed.apk"
+          KEYSTORE_PW=$(cat my-files/release.keystore.password)
+
+          "$ZIPALIGN" -v -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+          "$APKSIGNER" sign \
+            --ks my-files/release.keystore \
+            --ks-key-alias tiflogram \
+            --ks-pass "pass:$KEYSTORE_PW" \
+            --key-pass "pass:$KEYSTORE_PW" \
+            --out "$SIGNED_APK" \
+            "$ALIGNED_APK"
+
+          echo "signed_apk_path=$SIGNED_APK" >> $GITHUB_OUTPUT
+
+      - name: Imzolangan APK'ni Artifacts'ga yuklash
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiflogram-signed
+          path: ${{ steps.sign_apk.outputs.signed_apk_path }}
+
+      - name: Tayyor Release yaratish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Tiflogram - build #${{ github.run_number }}"
+          files: ${{ steps.sign_apk.outputs.signed_apk_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

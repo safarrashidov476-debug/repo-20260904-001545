@@ -1,0 +1,62 @@
+name: Yangi fork yaratish va tuzatishlarni qo'llash
+
+on:
+  workflow_dispatch:
+    inputs:
+      new_repo_name:
+        description: "Yangi repo (fork) nomi"
+        required: true
+        default: "Accessibility-Gram"
+
+jobs:
+  fork-and-setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Joriy repo'ni checkout qilish (tuzatish fayllarini olish uchun)
+        uses: actions/checkout@v4
+        with:
+          path: source-files
+
+      - name: GitHub CLI orqali kirish
+        run: echo "${{ secrets.FORK_TOKEN }}" | gh auth login --with-token
+        env:
+          GH_TOKEN: ${{ secrets.FORK_TOKEN }}
+
+      - name: DrKLO/Telegram'ni fork qilish
+        env:
+          GH_TOKEN: ${{ secrets.FORK_TOKEN }}
+        run: |
+          gh repo fork DrKLO/Telegram --fork-name "${{ inputs.new_repo_name }}" --clone=false --remote=false
+          echo "Fork tayyor bo'lishini kutyapmiz..."
+          sleep 20
+
+      - name: Yangi fork'ni klonlash
+        env:
+          GH_TOKEN: ${{ secrets.FORK_TOKEN }}
+        run: |
+          FORK_OWNER=$(gh api user --jq .login)
+          echo "FORK_OWNER=$FORK_OWNER" >> $GITHUB_ENV
+          git clone "https://x-access-token:${{ secrets.FORK_TOKEN }}@github.com/$FORK_OWNER/${{ inputs.new_repo_name }}.git" new-fork
+
+      - name: Tuzatish fayllarini yangi fork'ga ko'chirish
+        run: |
+          mkdir -p new-fork/scripts
+          mkdir -p new-fork/.github/workflows
+          cp source-files/scripts/fix_accessibility.py new-fork/scripts/
+          cp source-files/scripts/fix_branding.py new-fork/scripts/
+          cp source-files/.github/workflows/apply-patch.yml new-fork/.github/workflows/
+          cp source-files/.github/workflows/apply-branding.yml new-fork/.github/workflows/
+
+      - name: O'zgarishlarni yangi fork'ga yuborish
+        run: |
+          cd new-fork
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A
+          git commit -m "Accessibility va branding tuzatishlarini qo'shish"
+          git push
+
+      - name: Natija
+        run: |
+          echo "✅ Yangi fork tayyor: https://github.com/${{ env.FORK_OWNER }}/${{ inputs.new_repo_name }}"
+          echo "Endi o'sha repo'ning Actions bo'limiga o'tib, ikkala workflow avtomatik ishga tushganini ko'rishingiz mumkin."

@@ -1,0 +1,31 @@
+TIFLOGRAM - YANGILANGAN (build3+download-fix + compile-fix)
+==============================================================
+
+YUKLASH:
+- Yuklash tugaganda maxsus tovush (tiflogram_dl_done) — endi ishonchli:
+  putInDownloadsStore + loadingFileMessagesObservers + getFileName() zaxira
+- TalkBack: "Yuklash tugadi" (TYPE_ANNOUNCEMENT)
+- Foiz e'loni tavsifning ENG BOSHIDA (barcha media turlari: video/doc/gif/audio/music)
+- RadialProgress har 1% da CONTENT_CHANGED (fokusda)
+
+KOMPILYATSIYA TUZATISHLARI (2026-09-03):
+1) GeminiSafetyScanner.java va TiflogramTranslate.java
+   endi QAT'IY yo'lga ko'chiriladi:
+   telegram-src/TMessagesProj/src/main/java/org/telegram/messenger/
+   (eski find | head ishonchsiz edi — boshqa modulga tushib qolardi)
+
+2) tiflogram_dl_done.wav QAT'IY:
+   TMessagesProj/src/main/res/raw/tiflogram_dl_done.wav
+   (R.raw.tiflogram_dl_done shu modulda generatsiya qilinadi)
+
+3) Telegram manbasi PIN qilindi:
+   62b56a07ca7e30e39f7fd00a6728d6bbd716ca1c (12.10.1 / 7038)
+   — patchlar shu commitga moslangan
+
+4) Build oldidan PREFLIGHT tekshiruv:
+   Gemini class + wav mavjudligini majburiy tekshiradi,
+   yo'q bo'lsa Gradle ishga tushmaydi (erta xato).
+
+Boshqalar: reklamasiz, custom xabar tovushi, Gemini skaner, uzun matn->txt
+
+O'RNATISH: ZIP ni repo ga yuklang -> Actions -> Run workflow
